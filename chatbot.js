@@ -93,7 +93,7 @@ function saveHistory(threadId, history) {
 
 export async function generate(userMessage, threadId) {
   try {
-    const history = getHistory(threadId);
+    const history = getHistory(threadId).slice(-20);
 
     history.push({
       role: "user",
