@@ -17,6 +17,42 @@ const myCache = new NodeCache({
   stdTTL: 60 * 60 * 24, // 24 hours
 });
 
+const MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"];
+
+async function generateWithFallback(options) {
+  let lastError;
+
+  for (const model of MODELS) {
+    try {
+      console.log(`Trying model: ${model}`);
+
+      return await ai.models.generateContent({
+        model,
+        ...options,
+      });
+    } catch (error) {
+      console.log(`Model ${model} failed:`, error?.message);
+
+      lastError = error;
+
+      const status = error?.status;
+      const message = error?.message?.toLowerCase() || "";
+
+      const isQuotaError =
+        status === 429 ||
+        message.includes("quota") ||
+        message.includes("rate limit") ||
+        message.includes("resource exhausted");
+
+      if (!isQuotaError) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 async function searchWeb(query) {
   try {
     const cacheKey = `search:${query.toLowerCase()}`;
@@ -32,10 +68,7 @@ async function searchWeb(query) {
 
     const formattedResult = result.results
       .slice(0, 5)
-      .map(
-        (item) =>
-          `Title: ${item.title}\n${item.content}`
-      )
+      .map((item) => `Title: ${item.title}\n${item.content}`)
       .join("\n\n");
 
     myCache.set(cacheKey, formattedResult);
@@ -104,9 +137,7 @@ export async function generate(userMessage, threadId) {
       ],
     });
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-lite",
-
+    const response = await generateWithFallback({
       contents: history,
 
       config: {
@@ -115,10 +146,9 @@ export async function generate(userMessage, threadId) {
       },
     });
 
-    const toolCall =
-      response.candidates?.[0]?.content?.parts?.find(
-        (part) => part.functionCall
-      );
+    const toolCall = response.candidates?.[0]?.content?.parts?.find(
+      (part) => part.functionCall,
+    );
 
     // No Tool Call
     if (!toolCall) {
@@ -136,8 +166,7 @@ export async function generate(userMessage, threadId) {
       return response.text;
     }
 
-    const query =
-      toolCall.functionCall.args?.query;
+    const query = toolCall.functionCall.args?.query;
 
     if (!query) {
       return "No search query provided.";
@@ -145,45 +174,40 @@ export async function generate(userMessage, threadId) {
 
     console.log("Searching:", query);
 
-    const searchResult =
-      await searchWeb(query);
+    const searchResult = await searchWeb(query);
 
-    const finalResponse =
-      await ai.models.generateContent({
-        model: "gemini-2.5-flash-lite",
+    const finalResponse = await generateWithFallback({
+      config: {
+        systemInstruction: SYSTEM_PROMPT,
+      },
 
-        config: {
-          systemInstruction: SYSTEM_PROMPT,
+      contents: [
+        ...history,
+
+        {
+          role: "model",
+          parts: [
+            {
+              functionCall: toolCall.functionCall,
+            },
+          ],
         },
 
-        contents: [
-          ...history,
-
-          {
-            role: "model",
-            parts: [
-              {
-                functionCall:
-                  toolCall.functionCall,
-              },
-            ],
-          },
-
-          {
-            role: "user",
-            parts: [
-              {
-                functionResponse: {
-                  name: "searchWeb",
-                  response: {
-                    result: searchResult,
-                  },
+        {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                name: "searchWeb",
+                response: {
+                  result: searchResult,
                 },
               },
-            ],
-          },
-        ],
-      });
+            },
+          ],
+        },
+      ],
+    });
 
     history.push({
       role: "model",
@@ -198,10 +222,7 @@ export async function generate(userMessage, threadId) {
 
     return finalResponse.text;
   } catch (error) {
-    console.error(
-      "Generate Function Error:",
-      error
-    );
+    console.error("Generate Function Error:", error);
 
     if (error.status === 429) {
       return "Gemini API quota exceeded. Please wait and try again.";
